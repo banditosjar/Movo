@@ -857,7 +857,7 @@ function movoIcon(name,cls=''){
 function renderShell(){
  $('#boot').innerHTML=`<div class="shell movoShell movo124Shell">
  <aside class="side movoRail"><button class="railBrand" onclick="go('home')"><img src="assets/movo-symbol.svg" alt=""><img class="railWord" src="assets/movo-wordmark-white.svg" alt="Movo"></button><div class="railNav" id="sideNav"></div><div class="railBottom" id="sideUser"></div></aside>
- <main class="main movoMain"><header class="top movoTopbar"><button class="topBrandBtn" onclick="go('home')"><img src="assets/movo-wordmark-dark.svg" alt="Movo"></button><div id="topUser"></div></header><div id="content" class="pageContent movoPage"></div></main>
+ <main class="main movoMain"><header class="top movoTopbar"><button class="topBrandBtn" onclick="go('home')"><img class="brandLight125" src="assets/movo-wordmark-dark.svg" alt="Movo"><img class="brandDark125" src="assets/movo-wordmark-white.svg" alt="Movo"></button><div id="topUser"></div></header><div id="content" class="pageContent movoPage"></div></main>
  <nav class="bottom movoBottomNav" id="bottomNav"></nav></div><div id="modalRoot"></div>`;navs();
 }
 async function navs(){
@@ -866,7 +866,7 @@ async function navs(){
  const desktop=[['home','home','Home'],['group','crew','Crew'],['challenges','challenge','Challenges'],['rewards','reward','Rewards'],['me','profile','Profil'],['history','history','Historie'],['rules','rules','Regeln'],['more','more','Mehr']];
  $('#sideNav').innerHTML=desktop.map(([id,ic,t])=>`<button class="${currentView===id?'active':''}" onclick="go('${id}')">${movoIcon(ic)}<span>${t}</span></button>`).join('');
  let av=await avatarHTML(me,40);
- $('#topUser').innerHTML=`<button class="topUserBtn" onclick="go('more')">${av}<div><b>${escapeHtml(firstName(me))}</b><small>@${escapeHtml(me.username)}</small></div>${movoIcon('more')}</button>`;
+ $('#topUser').innerHTML=`<button class="topUserBtn" aria-label="Mein Movo-Menü öffnen" onclick="go('more')">${av}<div><b>${escapeHtml(firstName(me))}</b><small>@${escapeHtml(me.username)}</small></div>${movoIcon('more')}</button>`;
  $('#sideUser').innerHTML=`<button class="railUser" onclick="go('me')">${av}<span><b>${escapeHtml(firstName(me))}</b><small>@${escapeHtml(me.username)}</small></span></button>`;
 }
 function openMobileMenu(){
@@ -1421,13 +1421,24 @@ function nextStepTarget(steps){
  return 15000+(Math.floor((steps-15000)/5000)+1)*5000;
 }
 function todayNudgeHTML(){
- let route=activeDayRoute();
- return `<section class="panel todayPanel"><div class="panelHead"><div><span>DEIN HEUTE</span><h2>${route.qualified?'Streak gesichert ✓':'Was fehlt mir noch?'}</h2></div>${route.qualified?'<span class="statusPill ok">qualifiziert</span>':''}</div><div class="routeRows">${route.routes.map(r=>`<button onclick="${r.key==='daily'?`go('challenges')`:`openEntryHub('${r.key==='food'?'food':r.key==='steps'?'steps':'activity'}')`}" class="routeRow ${r.pct>=1?'done':''}"><span class="routeIcon">${movoIcon(r.icon)}</span><div><b>${r.title}</b><small>${escapeHtml(r.detail)}</small><i><em style="width:${Math.round(r.pct*100)}%"></em></i></div>${r.pct>=1?movoIcon('check'):'<span>›</span>'}</button>`).join('')}</div><button class="entryHubCta" onclick="openEntryHub()">${movoIcon('plus')}<span>Eintragen</span></button></section>`;
+ const route=activeDayRoute(),r=route.best,remaining=Math.max(0,r.target-r.value),today=fmtDate(),pts=pointsBetween(me.id,today,today);
+ const title=route.qualified?'Aktiver Tag geschafft.':r.key==='steps'?`Noch ${remaining.toLocaleString('de-DE')} Schritte.`:r.key==='food'?`Noch ${remaining} Ernährungsziel${remaining===1?'':'e'}.`:r.key==='activity'?'Deine nächste Bewegung zählt.':'Dein Tagesziel ist in Reichweite.';
+ const action=route.qualified?'openEntryHub()':r.key==='daily'?"go('challenges')":`openEntryHub('${r.key}')`;
+ const label=route.qualified?'Weiteren Eintrag hinzufügen':r.key==='steps'?'Schritte aktualisieren':r.key==='food'?'Ernährungsziele abhaken':r.key==='daily'?'Zur Tageschallenge':'Aktivität eintragen';
+ return `<section class="panel todayPanel focus125"><span class="focusEyebrow">DEIN NÄCHSTER SCHRITT</span><h2>${title}</h2><p class="focusSub">${route.qualified?'Deine Serie läuft. Gut gemacht.':'Ein Weg reicht, um deinen aktiven Tag zu sichern.'}</p><div class="focusTrack" role="progressbar" aria-label="${escapeHtml(r.title)} zum aktiven Tag" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(r.pct*100)}"><span style="width:${Math.round(r.pct*100)}%"></span></div><div class="focusLabels"><span>${escapeHtml(r.detail)}</span><span>Heute ${pts>=0?'+':''}${pts} P</span></div><button class="entryHubCta" onclick="${action}">${movoIcon(route.qualified?'plus':r.icon)}<span>${label}</span></button><details class="focusAlternatives"><summary>Auch andere Wege zählen</summary><p>7.500 Schritte, 3 Ernährungsziele, eine Aktivität ab 2 P oder Tageschallenge plus Gesundheitspunkt: Ein Weg genügt.</p><div class="routeRows">${route.routes.filter(x=>x.key!==r.key).map(x=>`<button class="routeRow ${x.pct>=1?'done':''}" onclick="${x.key==='daily'?"go('challenges')":`openEntryHub('${x.key}')`}"><span class="routeIcon">${movoIcon(x.icon)}</span><div><b>${x.title}</b><small>${escapeHtml(x.detail)}</small></div><span>›</span></button>`).join('')}</div></details></section>`;
 }
-
+function activeWeek125HTML(){
+ const start=startOfWeek(),today=fmtDate();let days='';
+ for(let i=0;i<7;i++){const d=new Date(start);d.setDate(d.getDate()+i);const date=fmtDate(d),done=activeDay(date,me.id),current=date===today;days+=`<div class="activeWeekDay ${done?'isDone':''} ${current?'isToday':''}" ${current?'aria-current="date"':''} aria-label="${d.toLocaleDateString('de-DE',{weekday:'long',day:'numeric',month:'long'})}: ${done?'aktiver Tag':date>today?'steht noch bevor':'noch nicht qualifiziert'}"><span>${d.toLocaleDateString('de-DE',{weekday:'short'})}</span><b>${done?'✓':d.getDate()}</b></div>`}
+ return `<section class="week125"><div class="panelHead"><h2>Deine Woche</h2><span>Aktive Tage</span></div><div class="activeWeek125">${days}</div></section>`;
+}
+function nextReward125HTML(){
+ const next=highestWishThreshold(me.id)+100,life=lifetimePoints(me.id),left=Math.max(0,next-life);
+ return `<button class="nextReward125" onclick="go('rewards')"><img src="assets/scene-rewards.svg" alt=""><span><b>${left?`Noch ${left.toLocaleString('de-DE')} P bis zur Belohnung`:'Dein Meilenstein ist erreicht'}</b><small>${next.toLocaleString('de-DE')} Gesamtpunkte · +5,00 € Wunsch-Guthaben</small></span><span aria-hidden="true">›</span></button>`;
+}
 async function homeHTML(){
- resetFeedCount();let hr=new Date().getHours(),greet=hr<11?'Guten Morgen':hr<18?'Hallo':'Guten Abend',av=await avatarHTML(me,58);
- return `<section class="screen homeScreen"><div class="homeDashboardTop"><header class="hero heroHome"><div class="heroGreeting">${av}<div><span>${greet},</span><h1>${escapeHtml(firstName(me))}! 👋</h1><p>Dranbleiben. Du machst das stark!</p></div></div>${homeMetricsHTML()}<div class="heroQuote">„Jeder Schritt zählt. <b>Für dich. Für uns.</b>“</div></header><div class="homeFocusColumn">${todayNudgeHTML()}<section class="panel desktopQuickEntry"><div class="panelHead"><div><span>SCHNELL</span><h2>Eintragen</h2></div></div><p class="muted small">Aktivität, Schritte oder Ernährung – auch bis zu 3 Tage rückwirkend.</p><button class="entryHubCta large" onclick="openEntryHub()">${movoIcon('plus')}<span>Eintrag hinzufügen</span></button></section></div></div><div class="homeDashboardBottom"><main class="homeMain">${outboxHTML()}${pendingWitnessHTML()}${votingBannerHTML()}<div class="sectionHead"><div><span>HEUTE</span><h2>Deine Challenges</h2></div><button onclick="go('challenges')">Alle →</button></div>${homeChallengesHTML()}<details class="softDetails"><summary>Meine Einträge heute <span>›</span></summary><div>${await todayOwnEntriesHTML()}</div></details></main><aside class="homeAside"><div class="sectionHead"><div><span>DEINE CREW</span><h2>Neu bei euch</h2></div><button onclick="go('group')">Crew →</button></div><div class="homeFeed">${await feedHTML(2)}</div></aside></div></section>`;
+ resetFeedCount();const hr=new Date().getHours(),greet=hr<11?'Guten Morgen':hr<18?'Hallo':'Guten Abend';
+ return `<section class="screen homeScreen home125"><header class="greeting125"><div><p>${new Date().toLocaleDateString('de-DE',{weekday:'long',day:'numeric',month:'long'})}</p><h1>${greet}, ${escapeHtml(firstName(me))}.</h1></div><span class="streak125">${movoIcon('activity')} ${streak()} ${streak()===1?'Tag':'Tage'}</span></header>${outboxHTML()}${pendingWitnessHTML()}${votingBannerHTML()}<div class="homeDashboardTop"><div class="homeFocus125"><div class="landscape125"><img src="assets/scene-home.svg" alt="Grüne Movo-Berglandschaft"><span>Dein Tempo. Dein Weg.</span></div>${todayNudgeHTML()}</div><div class="homeWeek125">${activeWeek125HTML()}${nextReward125HTML()}<section class="panel quick125"><div class="panelHead"><h2>Eintragen</h2></div><p class="focusSub">Was hast du heute für dich getan?</p>${quickAddModernHTML()}</section></div></div><div class="homeDashboardBottom"><main class="homeMain"><div class="sectionHead"><div><span>DEIN EINSATZ ZÄHLT</span><h2>Deine Challenges</h2></div><button onclick="go('challenges')">Alle →</button></div>${homeChallengesHTML()}<details class="softDetails"><summary>Meine Einträge heute <span>›</span></summary><div>${await todayOwnEntriesHTML()}</div></details></main><aside class="homeAside"><div class="sectionHead"><div><span>DEINE CREW</span><h2>Neu bei euch</h2></div><button onclick="go('group')">Crew →</button></div><div class="homeFeed">${await feedHTML(2)}</div></aside></div></section>`;
 }
 
 function crewPointBreakdown(userId,from=weekKey(),to=fmtDate(endOfWeek())){
@@ -2135,7 +2146,7 @@ function openReward(m){let opts=rewardOptions(m);$('#modalRoot').innerHTML=`<div
 async function chooseReward(m,key){let {error}=await sb.from('reward_choices').insert({user_id:me.id,month_key:monthKey(),milestone:m,reward_key:key});if(error)return toast(error.message);closeModal();await loadData();await render();toast('Belohnung gespeichert 🎁')}
 
 
-const MOVO_VERSION='1.24.1';
+const MOVO_VERSION='1.25.0';
 let movoReloading=false;
 
 function cleanMovoUrl(){
