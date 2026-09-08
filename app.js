@@ -122,7 +122,7 @@ function selectionForWeek(wk){return (window.weekSelections||[]).find(x=>x.week_
 function challengeProgressForWeek(ch,userId,wk){
  let es=entriesForWeek(wk).filter(e=>e.user_id===userId);
  if(!ch)return [0,1];
- if(ch.id==='move3'){let ds=[...new Set(es.filter(e=>e.kind==='activity'&&e.minutes>=30).map(e=>e.entry_date))];return [ds.length,3]}
+ if(ch.id==='move3'){let days=new Map();for(const e of es){if(e.kind==='activity')days.set(e.entry_date,(days.get(e.entry_date)||0)+(+e.minutes||0))}return [[...days.values()].filter(n=>n>=30).length,3]}
  if(ch.id==='steps4')return [es.filter(e=>e.kind==='steps'&&e.steps>=10000).length,4];
  if(ch.id==='healthy5')return [es.filter(e=>e.kind==='food'&&(e.food_items||[]).length>=5).length,5];
  if(ch.id==='sport180')return [es.filter(e=>e.kind==='activity').reduce((s,e)=>s+(+e.minutes||0),0),180];
@@ -134,7 +134,7 @@ function weeklyChallengeCompletionDate(ch,userId,wk){
  if(!ch)return null;
  let es=entriesForWeek(wk).filter(e=>e.user_id===userId).slice().sort((a,b)=>String(a.entry_date).localeCompare(String(b.entry_date))||String(a.created_at||'').localeCompare(String(b.created_at||'')));
  if(ch.id==='move3'){
-  let days=[];for(let e of es){if(e.kind==='activity'&&+e.minutes>=30&&!days.includes(e.entry_date)){days.push(e.entry_date);if(days.length>=3)return e.entry_date}}
+  let totals=new Map(),days=new Set();for(const e of es){if(e.kind==='activity'){totals.set(e.entry_date,(totals.get(e.entry_date)||0)+(+e.minutes||0));if(totals.get(e.entry_date)>=30)days.add(e.entry_date);if(days.size>=3)return e.entry_date}}
  }
  if(ch.id==='steps4'){
   let q=es.filter(e=>e.kind==='steps'&&+e.steps>=10000);return q[3]?.entry_date||null;
@@ -223,6 +223,7 @@ function rewardPointsBetween(userId,from,to){return pointsBetween(userId,from,to
 function bonusPointsOf(userId,list){let range=rangeOf(list);return range?bonusPointsBetween(userId,range[0],range[1]):0}
 function pointsOf(userId,list){let range=rangeOf(list);return basePointsOf(userId,list)+(range?bonusPointsBetween(userId,range[0],range[1]):0)}
 function lifetimePoints(userId){
+ if(serverRewardState?.user_id===userId)return Number(serverRewardState.points);
  let dates=[...allPointDates(userId),...streakBonusEvents(userId).map(x=>x.date)].sort();
  if(!dates.length)return 0;
  return Math.max(0,rewardPointsBetween(userId,dates[0],dates.at(-1)));
@@ -241,50 +242,51 @@ function openRewardChoicesFor(userId){
 }
 async function syncWishCredit(){
  if(!me?.id||!me?.approved)return;
- let target=Math.floor(lifetimePoints(me.id)/100)*100;
- let next=highestWishThreshold(me.id)+100,claimed=[];
+ const uid=me.id,q=await sb.rpc('movo_reward_state');
+ if(q.error)throw new Error('Movo-Datenbankupdate V1.24.1 fehlt oder ist nicht erreichbar: '+q.error.message);
+ if(me?.id!==uid)return;
+ serverRewardState={...q.data,user_id:uid};
+ const target=Math.floor(Number(q.data.points)/100)*100;let next=Number(q.data.next_threshold),claimed=false;
  while(next<=target){
-  let threshold=next,{error}=await sb.rpc('claim_wish_credit',{target_threshold:threshold});
-  if(error){
-   console.warn('Wunsch-Guthaben konnte nicht synchronisiert werden:',error);
-   break;
-  }
-  claimed.push(threshold);next+=100;
+  const {error}=await sb.rpc('claim_wish_credit',{target_threshold:next});
+  if(error){console.warn('Guthaben:',error);break}claimed=true;next+=100;
  }
- if(claimed.length){
-  let q=await sb.from('wish_credit_transactions').select('*').order('created_at',{ascending:false});
-  if(!q.error)wishCreditTransactions=q.data||[];
-  for(let threshold of claimed)notifyUser(me.id,'💰 +5,00 € Wunsch-Guthaben',`Du hast ${threshold} Gesamtpunkte erreicht. Dein Wunsch-Guthaben ist gewachsen.`,'rewards',true);
- }
+ if(claimed){const rows=await readAllRows('wish_credit_transactions');if(rows.error)throw rows.error;wishCreditTransactions=rows.data;const state=await sb.rpc('movo_reward_state');if(!state.error&&me?.id===uid)serverRewardState={...state.data,user_id:uid}}
 }
+
 function wishCreditMiniHTML(){
  let bal=wishCreditBalanceCents(me.id),points=lifetimePoints(me.id),next=highestWishThreshold(me.id)+100,remaining=Math.max(0,next-points);
  return `<div class="wishMini card pad"><div><div class="tiny muted">💰 Wunsch-Guthaben</div><b>${euro(bal)}</b><div class="tiny muted">${remaining} P bis zu den nächsten 5,00 €</div></div><button class="react" onclick="go('rewards')">Belohnungen</button></div>`;
 }
+function pendingWishSpend(uid=me?.id){try{return JSON.parse(localStorage.getItem('movo-pending-spend:'+uid)||'null')}catch{return null}}
 function openWishRedeem(){
- let bal=wishCreditBalanceCents(me.id);
- if(bal<=0)return toast('Aktuell ist noch kein Wunsch-Guthaben verfügbar.');
- $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>💰 Wunsch-Guthaben einlösen</h2><button class="x" onclick="closeModal()">×</button></div>
-  <div class="wishBalanceHero"><span>Verfügbar</span><b>${euro(bal)}</b></div>
-  <form class="form section" onsubmit="redeemWishCredit(event)">
-   <div class="field"><label>Wie viel hast du ausgegeben?</label><input id="wishSpendAmount" inputmode="decimal" placeholder="z. B. 12,99" required></div>
-   <div class="field"><label>Wofür? <span class="muted">(optional)</span></label><input id="wishSpendNote" maxlength="120" placeholder="z. B. Brettspiel"></div>
-   <div class="tiny muted">Du kannst auch nur einen Teil einlösen. Restguthaben bleibt vollständig erhalten.</div>
-   <button class="cta">Betrag einlösen</button>
-  </form></div></div>`;
+ const pending=pendingWishSpend(),bal=wishCreditBalanceCents(me.id);
+ if(bal<=0&&!pending)return toast('Aktuell ist noch kein Wunsch-Guthaben verfügbar.');
+ $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>💰 Wunsch-Guthaben einlösen</h2><button class="x" aria-label="Schließen" onclick="closeModal()">×</button></div><div class="wishBalanceHero"><span>Verfügbar</span><b>${euro(bal)}</b></div>${pending?'<div class="notice">Eine Einlösung ist noch nicht bestätigt. Mit „Status bestätigen“ wird derselbe Auftrag sicher erneut geprüft.</div>':''}<form class="form section" onsubmit="redeemWishCredit(event)"><div class="field"><label for="wishSpendAmount">Wie viel hast du ausgegeben?</label><input id="wishSpendAmount" inputmode="decimal" placeholder="z. B. 12,99" value="${pending?(pending.cents/100).toFixed(2):''}" ${pending?'disabled':''} required></div><div class="field"><label for="wishSpendNote">Wofür? (optional)</label><input id="wishSpendNote" maxlength="120" value="${escapeHtml(pending?.note||'')}" ${pending?'disabled':''}></div><button class="cta">${pending?'Status bestätigen':'Betrag einlösen'}</button></form></div></div>`;
 }
 async function redeemWishCredit(e){
- e.preventDefault();
- let raw=String($('#wishSpendAmount')?.value||'').trim().replace(',','.'),
-     cents=Math.round(Number(raw)*100),
-     note=$('#wishSpendNote')?.value?.trim()||null,
-     bal=wishCreditBalanceCents(me.id);
- if(!Number.isFinite(cents)||cents<=0)return toast('Bitte einen gültigen Betrag eingeben.');
- if(cents>bal)return toast('Der Betrag ist höher als dein verfügbares Guthaben.');
- let {error}=await sb.rpc('redeem_wish_credit',{spend_cents:cents,spend_note:note});
- if(error)return toast('Guthaben konnte nicht eingelöst werden: '+error.message);
- closeModal();await loadData();await render();toast(`${euro(cents)} eingelöst ✓`);
+ e.preventDefault();if(wishSpendBusy)return;
+ const uid=me?.id,key='movo-pending-spend:'+uid;let request=pendingWishSpend(uid);
+ if(!request){
+  const cents=Math.round(Number(String($('#wishSpendAmount').value).trim().replace(',','.'))*100),note=$('#wishSpendNote').value.trim()||null;
+  if(!Number.isSafeInteger(cents)||cents<=0||cents>wishCreditBalanceCents(uid))return toast('Bitte einen gültigen Betrag innerhalb deines Guthabens eingeben.');
+  request={id:crypto.randomUUID(),cents,note};
+  try{localStorage.setItem(key,JSON.stringify(request))}catch{return toast('Speicherung auf diesem Gerät nicht möglich. Bitte Browsereinstellungen prüfen.')}
+ }
+ wishSpendBusy=true;const button=e.currentTarget?.querySelector('button.cta');if(button)button.disabled=true;
+ try{
+  const {error}=await sb.rpc('movo_redeem_wish_credit',{request_id:request.id,spend_cents:request.cents,spend_note:request.note});
+  if(error)throw error;
+  localStorage.removeItem(key);if(me?.id!==uid)return;
+  closeModal();
+  try{await loadData();await render();toast(`${euro(request.cents)} eingelöst ✓`)}catch{toast('Einlösung bestätigt ✓ Die Anzeige wird später aktualisiert.')}
+ }catch(err){
+  // A SQL validation error is an explicit rejection; network errors may hide success.
+  if(err?.code==='P0001')localStorage.removeItem(key);
+  if(me?.id===uid){openWishRedeem();toast(err?.code==='P0001'?err.message:'Einlösung noch nicht bestätigt. Bitte denselben Auftrag erneut prüfen.')}
+ }finally{wishSpendBusy=false;if(button)button.disabled=false}
 }
+
 function ownWishHistoryHTML(){
  let rows=wishCreditRows(me.id).slice().sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at)));
  if(!rows.length)return '<div class="muted">Noch keine Guthaben-Buchungen.</div>';
@@ -350,8 +352,8 @@ function showAuth(){
 function authTab(tab){
  $('#tabLogin').classList.toggle('active',tab==='login');$('#tabReg').classList.toggle('active',tab==='reg');
  $('#authBody').innerHTML=tab==='login'?`<form class="form" onsubmit="login(event)">
-  <div class="field"><label>Benutzername</label><input id="loginUser" autocomplete="username" required></div>
-  <div class="field"><label>Passwort</label><input id="loginPass" type="password" autocomplete="current-password" required></div>
+  <div class="field"><label for="loginUser">Benutzername</label><input id="loginUser" autocomplete="username" required></div>
+  <div class="field"><label for="loginPass">Passwort</label><input id="loginPass" type="password" autocomplete="current-password" required></div>
   <label class="rememberLogin"><input id="rememberLogin" type="checkbox" ${rememberLoginEnabled()?'checked':''}><span><b>Angemeldet bleiben</b><small>Auf diesem Gerät dauerhaft angemeldet bleiben.</small></span></label>
   <div id="authErr"></div><button class="cta">Anmelden</button>
   <div class="tiny muted">Der Benutzername wird nur für den Login verwendet. In Movo sehen andere deinen Vornamen.</div>
@@ -443,7 +445,7 @@ function showPendingApproval(){
    <div style="font-size:48px">🔒</div>
    <h2>Freischaltung ausstehend</h2>
    <p>Hallo <b>${escapeHtml(me.first_name)}</b>! Dein Movo-Konto wurde erstellt, muss aber zuerst von einem Admin freigeschaltet werden.</p>
-   <div class="notice small" style="text-align:left"><b>Private Crew:</b> Ohne Freigabe hast du keinen Zugriff auf Feed, Rankings, Fotos oder andere Nutzerdaten.</div><div class="pendingIntro"><div>⭐ Punkte sammeln</div><div>🔥 Jeden Punktetag als Streak sichern</div><div>🎯 Individuelle Tages- & Wochenchallenges</div><div>🎁 Belohnungen freischalten</div></div>
+   <div class="notice small" style="text-align:left"><b>Private Crew:</b> Ohne Freigabe hast du keinen Zugriff auf Feed, Rankings, Fotos oder andere Nutzerdaten.</div><div class="pendingIntro"><div>⭐ Punkte sammeln</div><div>🔥 Qualifizierte aktive Tage als Streak sichern</div><div>🎯 Individuelle Tages- & Wochenchallenges</div><div>🎁 Belohnungen freischalten</div></div>
    <div class="grid" style="margin-top:18px">
      <button class="cta" onclick="checkApproval()">Status prüfen</button>
      <button class="secondary" onclick="logout()">Abmelden</button>
@@ -456,18 +458,24 @@ async function checkApproval(){
  if(data?.approved){me=data;toast('Freigeschaltet ✓');await bootApp()}
  else toast('Noch nicht freigeschaltet.');
 }
+async function readAllRows(table,order='id',ascending=true){
+ let rows=[],offset=0;const size=500;
+ while(true){let query=sb.from(table).select('*',{count:'exact'}).order(order,{ascending});if(!['id','week_key'].includes(order))query=query.order('id',{ascending});const q=await query.range(offset,offset+size-1);if(q.error)return q;const page=q.data||[];rows.push(...page);offset+=page.length;if(page.length===0||(q.count!=null&&offset>=q.count)||(q.count==null&&page.length<size))return {data:rows,error:null};}
+}
+
 async function loadData(){
+ serverRewardState=null;
  let names=['profiles','entries','reactions','weekly_challenges','reward_choices','challenge_pool','challenge_proposals','challenge_proposal_votes','challenge_ratings','group_challenge_assignments','daily_challenge_assignments','daily_user_challenge_assignments','daily_challenge_completions','achievements','challenge_completions','admin_audit_log','reward_pool','reward_proposals','reward_proposal_votes','reward_pool_votes','feed_comments','witness_confirmations','user_preferences','wish_credit_transactions','feed_reactions','weekly_choice_windows','feed_day_posts'];
  let results=await Promise.all([
   sb.from('profiles').select('*').order('created_at'),
-  sb.from('entries').select('*').order('entry_date',{ascending:false}).order('created_at',{ascending:false}),
-  sb.from('reactions').select('*'),sb.from('weekly_challenges').select('*'),sb.from('reward_choices').select('*'),
-  sb.from('challenge_pool').select('*').order('challenge_type').order('name'),sb.from('challenge_proposals').select('*').order('created_at',{ascending:false}),sb.from('challenge_proposal_votes').select('*'),sb.from('challenge_ratings').select('*'),
-  sb.from('group_challenge_assignments').select('*'),sb.from('daily_challenge_assignments').select('*'),sb.from('daily_user_challenge_assignments').select('*'),sb.from('daily_challenge_completions').select('*').order('created_at',{ascending:false}),
+  readAllRows('entries','created_at',false),
+  sb.from('reactions').select('*'),readAllRows('weekly_challenges','week_key'),sb.from('reward_choices').select('*'),
+  readAllRows('challenge_pool','name'),sb.from('challenge_proposals').select('*').order('created_at',{ascending:false}),sb.from('challenge_proposal_votes').select('*'),sb.from('challenge_ratings').select('*'),
+  readAllRows('group_challenge_assignments','week_key'),sb.from('daily_challenge_assignments').select('*'),sb.from('daily_user_challenge_assignments').select('*'),readAllRows('daily_challenge_completions'),
   sb.from('achievements').select('*').order('achieved_on',{ascending:false}),sb.from('challenge_completions').select('*').order('created_at',{ascending:false}),sb.from('admin_audit_log').select('*').order('created_at',{ascending:false}).limit(200),
   sb.from('reward_pool').select('*').order('points_required'),sb.from('reward_proposals').select('*').order('created_at',{ascending:false}),sb.from('reward_proposal_votes').select('*'),sb.from('reward_pool_votes').select('*'),
   sb.from('feed_comments').select('*').order('created_at'),sb.from('witness_confirmations').select('*'),sb.from('user_preferences').select('*'),
-  sb.from('wish_credit_transactions').select('*').order('created_at',{ascending:false}),
+  readAllRows('wish_credit_transactions'),
   sb.from('feed_reactions').select('*'),sb.from('weekly_choice_windows').select('*'),sb.from('feed_day_posts').select('*').order('post_date',{ascending:false}).order('updated_at',{ascending:false})
  ]);
  let failed=results.map((r,i)=>r?.error?{name:names[i],error:r.error}:null).filter(Boolean);
@@ -523,26 +531,113 @@ async function changeTheme(v){await savePreferencePatch({theme:v});toast('Darste
 async function togglePref(key,val){await savePreferencePatch({[key]:!!val});await render()}
 function feedAllowed(userId,type){let p=prefFor(userId);return type==='activity'?p.feed_activity:type==='food'?p.feed_food:type==='steps'?p.feed_steps:type==='daily'?p.feed_daily:type==='achievement'?p.feed_achievements:true}
 
-function getOutbox(){try{return JSON.parse(localStorage.getItem('movo-outbox')||localStorage.getItem('fit4us-outbox')||'[]')}catch{return []}}
-function setOutbox(q){localStorage.setItem('movo-outbox',JSON.stringify(q))}
-function queueEntry(payload,mode='insert',id=null){let q=getOutbox();q.push({id:crypto.randomUUID?.()||String(Date.now()+Math.random()),kind:'entry',mode,entryId:id,payload,queuedAt:new Date().toISOString()});setOutbox(q)}
-function outboxHTML(){let n=getOutbox().length;return n?`<div class="notice section outboxNotice"><b>📡 ${n} Eintrag${n===1?'':'e'} wartet${n===1?'':'n'} auf Synchronisierung.</b><button class="react" onclick="flushOutbox(true)">Jetzt versuchen</button></div>`:''}
+const OUTBOX_PREFIX='movo-outbox-v1241:';
+let entrySaveBusy=false,outboxInFlight=null,serverRewardState=null,wishSpendBusy=false;
+function operationKey(uid,id){return OUTBOX_PREFIX+uid+':'+id}
+function migrateOutbox(uid){
+ if(!uid)return;
+ for(const legacyKey of ['movo-outbox','fit4us-outbox']){
+  let q;try{q=JSON.parse(localStorage.getItem(legacyKey)||'[]')}catch{continue}
+  if(!Array.isArray(q))continue;
+  const remain=[];
+  for(const item of q){
+   if(item.payload?.user_id!==uid){remain.push(item);continue}
+   const id=/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(item.id||'')?item.id:crypto.randomUUID();
+   const key=operationKey(uid,id);
+   if(!localStorage.getItem(key))localStorage.setItem(key,JSON.stringify({...item,id,error:null}));
+  }
+  localStorage.setItem(legacyKey,JSON.stringify(remain));
+ }
+}
+function getOutbox(uid=me?.id){
+ if(!uid)return [];
+ migrateOutbox(uid);const prefix=OUTBOX_PREFIX+uid+':',q=[];
+ for(let i=0;i<localStorage.length;i++){
+  const key=localStorage.key(i);if(!key?.startsWith(prefix))continue;
+  try{const item=JSON.parse(localStorage.getItem(key));if(item?.payload?.user_id===uid)q.push(item)}catch{}
+ }
+ return q.sort((a,b)=>String(a.queuedAt).localeCompare(String(b.queuedAt))||a.id.localeCompare(b.id));
+}
+function queueEntry(payload,mode='insert',id=null){
+ if(payload.user_id!==me?.id)throw new Error('Das angemeldete Konto hat sich geändert.');
+ const item={id:crypto.randomUUID(),kind:'entry',mode,entryId:id,payload,queuedAt:new Date().toISOString(),error:null};
+ localStorage.setItem(operationKey(payload.user_id,item.id),JSON.stringify(item));return item;
+}
+function removeQueuedEntry(item){localStorage.removeItem(operationKey(item.payload.user_id,item.id))}
+function markQueuedError(item,err){item.error=String(err?.message||err);localStorage.setItem(operationKey(item.payload.user_id,item.id),JSON.stringify(item))}
+function discardQueuedEntry(id){const item=getOutbox().find(x=>x.id===id);if(item&&confirm('Diesen noch nicht bestätigten Speicherauftrag entfernen? Bei einem Verbindungsabbruch kann er bereits auf dem Server gespeichert sein.')){removeQueuedEntry(item);render()}}
+function outboxHTML(){
+ const q=getOutbox();if(!q.length)return '';
+ return `<div class="notice section outboxNotice"><b>📡 ${q.length} Speicherauftrag${q.length===1?'':'e'} noch nicht bestätigt.</b><p class="small">Deine Angaben bleiben auf diesem Gerät erhalten, bis Movo die Speicherung bestätigt.</p>${q.filter(x=>x.error).map(x=>`<div class="small">${escapeHtml(x.payload.entry_date)}: ${escapeHtml(x.error)} <button class="react" onclick="discardQueuedEntry('${x.id}')">Entfernen</button></div>`).join('')}<button class="react" onclick="flushOutbox(true)">Jetzt synchronisieren</button></div>`;
+}
 function likelyOffline(err){return !navigator.onLine||/fetch|network|offline|failed to fetch/i.test(String(err?.message||err||''))}
+async function sendQueuedEntry(item){
+ if(!me?.id||me.id!==item.payload.user_id)throw new Error('Das angemeldete Konto hat sich geändert.');
+ const {data,error}=await sb.rpc('movo_save_entry',{request_id:item.id,payload:item.payload,entry_id:item.entryId||null});
+ if(error)throw error;
+ if(!data?.entry?.id)throw new Error('Speicherung wurde nicht bestätigt. Bitte erneut synchronisieren.');
+ removeQueuedEntry(item);return data;
+}
+async function withEntryLock(uid,fn){
+ if(navigator.locks?.request)return navigator.locks.request('movo-entry-sync:'+uid,fn);
+ return fn();
+}
+async function refreshAfterEntry(before,date,delta=0,uid=me?.id){
+ if(me?.id!==uid)return false;
+ try{
+  await loadData();if(me?.id!==uid)return false;
+  await detectChallengeCompletions(date);await render();floatPoints(delta);if(before)maybeCelebrate(before);return true;
+ }catch(err){console.warn('Eintrag gespeichert; Anzeige konnte nicht aktualisiert werden:',err);toast('Gespeichert ✓ Die Anzeige wird bei der nächsten Verbindung aktualisiert.');return false}
+}
 async function flushOutbox(manual=false){
+ if(outboxInFlight)return outboxInFlight;
+ const uid=me?.id;if(!uid||!me.approved)return;
  if(!navigator.onLine){if(manual)toast('Noch keine Internetverbindung.');return}
- let q=getOutbox();if(!q.length)return;let remain=[];
- for(let item of q){try{
-   let p=item.payload,res;
-   if(item.entryId)res=await sb.from('entries').update(p).eq('id',item.entryId).eq('user_id',me.id);
-   else if(p.kind==='steps'||p.kind==='food'){
-     let old=(await sb.from('entries').select('id').eq('user_id',me.id).eq('entry_date',p.entry_date).eq('kind',p.kind).maybeSingle()).data;
-     res=old?await sb.from('entries').update(p).eq('id',old.id):await sb.from('entries').insert(p);
-   }else res=await sb.from('entries').insert(p);
-   if(res.error)throw res.error;if(p.witness_user_id){let entryId=item.entryId||res.data?.id;if(!entryId){let q=await sb.from('entries').select('id').eq('user_id',me.id).eq('entry_date',p.entry_date).eq('kind','activity').order('created_at',{ascending:false}).limit(1).maybeSingle();entryId=q.data?.id}if(entryId)await sb.from('witness_confirmations').upsert({entry_id:entryId,entry_owner_id:me.id,witness_user_id:p.witness_user_id,status:'pending',responded_at:null},{onConflict:'entry_id'})}
- }catch(e){remain.push(item)}}
- setOutbox(remain);if(remain.length<q.length){await loadData();await render();toast(`${q.length-remain.length} Offline-Eintrag${q.length-remain.length===1?'':'e'} synchronisiert ✓`)}else if(manual)toast('Synchronisierung noch nicht möglich.')
+ outboxInFlight=withEntryLock(uid,async()=>{
+  let count=0;const dates=new Set();
+  for(const item of getOutbox(uid)){
+   if(me?.id!==uid)break;
+   try{await sendQueuedEntry(item);count++;dates.add(item.payload.entry_date)}
+   catch(err){markQueuedError(item,err);break}
+  }
+  if(count&&me?.id===uid){
+   try{await loadData();if(me?.id!==uid)return;for(const date of dates)await detectChallengeCompletions(date);await render();toast(`${count} Speicherauftrag${count===1?'':'e'} bestätigt ✓`)}
+   catch(err){toast('Synchronisiert ✓ Die Anzeige wird später aktualisiert.')}
+  }else if(manual&&me?.id===uid){await render();toast(getOutbox(uid).length?'Noch nicht synchronisiert – Hinweis beim Speicherauftrag beachten.':'Alles synchronisiert ✓')}
+ }).finally(()=>{outboxInFlight=null});
+ return outboxInFlight;
 }
 window.addEventListener('online',()=>flushOutbox(false));
+
+async function submitEntry(buildPayload,id='',form=null){
+ if(entrySaveBusy)return;entrySaveBusy=true;
+ const uid=me?.id,buttons=form?[...form.querySelectorAll('button[type="submit"],button.cta')]:[];
+ buttons.forEach(b=>b.disabled=true);
+ try{
+  const before=celebrationSnapshot(),payload=await buildPayload();
+  if(me?.id!==uid)throw new Error('Das angemeldete Konto hat sich geändert.');
+  const item=queueEntry(payload,id?'update':'insert',id||null);
+  let data;
+  try{
+   data=await withEntryLock(uid,async()=>{
+    // Older edits must arrive first, including edits entered on another tab.
+    for(const pending of getOutbox(uid)){const result=await sendQueuedEntry(pending);if(pending.id===item.id)return result}
+    // A different tab may already have completed this exact request.
+    return sendQueuedEntry(item);
+   });
+  }catch(err){
+   markQueuedError(item,err);closeModal();
+   try{await render()}catch{}
+   toast(likelyOffline(err)?'Auf diesem Gerät vorgemerkt – noch nicht synchronisiert.':'Noch nicht gespeichert. Den Hinweis beim Speicherauftrag beachten.');return;
+  }
+  if(me?.id!==uid)return;
+  closeModal();
+  const refreshed=await refreshAfterEntry(before,payload.entry_date,Number(data.point_delta??((+data.entry.points||0)-(+data.previous_points||0))),uid);
+  if(refreshed)toast(payload.entry_date===fmtDate()?'Gespeichert ✓':'Rückwirkend gespeichert ✓');
+  if(payload.witness_user_id&&prefFor(payload.witness_user_id).notify_witness)notifyUser(payload.witness_user_id,`${firstName(me)} nennt dich als Zeuge 👀`,`${ACTIVITIES[payload.activity]?.name||'Aktivität'} · ${payload.minutes} Min.`,'witness');
+ }catch(err){toast(err?.message||'Speichern nicht möglich. Deine Angaben bleiben im Formular.')}
+ finally{entrySaveBusy=false;buttons.forEach(b=>b.disabled=false)}
+}
 
 function celebrationSnapshot(){
  let pts=monthRewardPoints(),st=streak(),mine=entries.filter(e=>e.user_id===me.id),maxSteps=Math.max(0,...mine.filter(e=>e.kind==='steps').map(e=>+e.steps||0));
@@ -587,26 +682,18 @@ function quickTemplates(){let cutoff=new Date();cutoff.setDate(cutoff.getDate()-
 function quickTemplatesHTML(){let q=quickTemplates();if(!q.length)return '';return `<div class="sectionTitle"><h2>⚡ Schnell eintragen</h2><span class="pill">aus deinen letzten 30 Tagen</span></div><div class="quickTemplates">${q.map(x=>`<button class="quickTemplate" onclick="openQuickTemplate('${x.activity}',${x.minutes},${x.distance??'null'})"><span>${ACTIVITIES[x.activity]?.icon||'⚡'}</span><b>${escapeHtml(ACTIVITIES[x.activity]?.name||'Aktivität')}</b><small>${x.minutes} Min.${x.distance?` · ${x.distance} km`:''}</small></button>`).join('')}</div>`}
 
 function openEntryHub(preferred=null,date=null){
- let b=entryDateBounds();entryHubDate=date||entryHubDate||b.max;let q=quickTemplates();
- $('#modalRoot').innerHTML=`<div class="modal sheetModal" onclick="if(event.target===this)closeModal()"><div class="modalCard entryHubSheet"><div class="modalHead"><div><small>DEIN TAG</small><h2>Was möchtest du eintragen?</h2></div><button class="x" onclick="closeModal()">${movoIcon('close')}</button></div><div class="field"><label>Datum</label><input id="entryHubDate" type="date" min="${b.min}" max="${b.max}" value="${entryHubDate}" onchange="entryHubDate=this.value"></div><div class="entryHubChoices"><button onclick="entryHubChoose('activity')"><span>${movoIcon('activity')}</span><b>Aktivität</b><small>Sport, Spaziergang & mehr</small></button><button onclick="entryHubChoose('steps')"><span>${movoIcon('steps')}</span><b>Schritte</b><small>Tagesstand aktualisieren</small></button><button onclick="entryHubChoose('food')"><span>${movoIcon('food')}</span><b>Ernährung</b><small>Tagesziele abhaken</small></button></div>${q.length?`<div class="hubTemplates"><span>SCHNELLVORLAGEN</span>${q.map(x=>`<button onclick="entryHubQuick('${x.activity}',${x.minutes},${x.distance??'null'})"><b>${escapeHtml(ACTIVITIES[x.activity]?.name||'Aktivität')}</b><small>${x.minutes} Min.${x.distance?` · ${x.distance} km`:''}</small></button>`).join('')}</div>`:''}</div></div>`;
+ let b=entryDateBounds();entryHubDate=date||b.max;let q=quickTemplates();
+ $('#modalRoot').innerHTML=`<div class="modal sheetModal" onclick="if(event.target===this)closeModal()"><div class="modalCard entryHubSheet"><div class="modalHead"><div><small>DEIN TAG</small><h2>Was möchtest du eintragen?</h2></div><button class="x" aria-label="Schließen" onclick="closeModal()">${movoIcon('close')}</button></div><div class="field"><label>Datum</label><input id="entryHubDate" type="date" min="${b.min}" max="${b.max}" value="${entryHubDate}" onchange="entryHubDate=this.value"></div><div class="entryHubChoices"><button onclick="entryHubChoose('activity')"><span>${movoIcon('activity')}</span><b>Aktivität</b><small>Sport, Spaziergang & mehr</small></button><button onclick="entryHubChoose('steps')"><span>${movoIcon('steps')}</span><b>Schritte</b><small>Tagesstand aktualisieren</small></button><button onclick="entryHubChoose('food')"><span>${movoIcon('food')}</span><b>Ernährung</b><small>Tagesziele abhaken</small></button></div>${q.length?`<div class="hubTemplates"><span>SCHNELLVORLAGEN</span>${q.map(x=>`<button onclick="entryHubQuick('${x.activity}',${x.minutes},${x.distance??'null'})"><b>${escapeHtml(ACTIVITIES[x.activity]?.name||'Aktivität')}</b><small>${x.minutes} Min.${x.distance?` · ${x.distance} km`:''}</small></button>`).join('')}</div>`:''}</div></div>`;
  if(preferred)setTimeout(()=>entryHubChoose(preferred),0);
 }
 function entryHubChoose(kind){let d=$('#entryHubDate')?.value||entryHubDate||entryDateBounds().max;entryHubDate=d;closeModal();openEntry(kind,null,d)}
 function entryHubQuick(activity,minutes,distance){let d=$('#entryHubDate')?.value||entryHubDate||entryDateBounds().max;closeModal();openQuickTemplate(activity,minutes,distance,d)}
 
 function openQuickTemplate(activity,minutes,distance,dateOverride=null){
- let a=ACTIVITIES[activity],b=entryDateBounds(),d=dateOverride||b.max;$('#modalRoot').innerHTML=`<div class="modal sheetModal"><div class="modalCard entrySheet"><div class="modalHead"><div><small>SCHNELLVORLAGE</small><h2>${escapeHtml(a?.name||'Aktivität')}</h2></div><button class="x" onclick="closeModal()">${movoIcon('close')}</button></div><p>${minutes} Min.${distance?` · ${distance} km`:''}</p><div class="field"><label>Datum</label><input id="quickEntryDate" type="date" min="${b.min}" max="${b.max}" value="${d}" required></div><div class="notice small">Zeuge: <b>Ehrenkodex</b></div><button class="cta section" onclick="saveQuickActivity('${activity}',${minutes},${distance??'null'})">Jetzt eintragen</button></div></div>`;
+ let a=ACTIVITIES[activity],b=entryDateBounds(),d=dateOverride||b.max;$('#modalRoot').innerHTML=`<div class="modal sheetModal"><div class="modalCard entrySheet"><div class="modalHead"><div><small>SCHNELLVORLAGE</small><h2>${escapeHtml(a?.name||'Aktivität')}</h2></div><button class="x" aria-label="Schließen" onclick="closeModal()">${movoIcon('close')}</button></div><p>${minutes} Min.${distance?` · ${distance} km`:''}</p><div class="field"><label>Datum</label><input id="quickEntryDate" type="date" min="${b.min}" max="${b.max}" value="${d}" required></div><div class="notice small">Zeuge: <b>Ehrenkodex</b></div><button class="cta section" onclick="saveQuickActivity('${activity}',${minutes},${distance??'null'})">Jetzt eintragen</button></div></div>`;
 }
 async function saveQuickActivity(activity,minutes,distance){
- let before=celebrationSnapshot(),entryDate=selectedEntryDate('quickEntryDate'),
-     payload={user_id:me.id,entry_date:entryDate,kind:'activity',activity,minutes,distance,witness:'Ehrenkodex',witness_user_id:null,points:calcCappedActivityPoints(me.id,entryDate,activity,minutes,distance,null)};
- let {error}=await sb.from('entries').insert(payload);
- if(error){
-  if(likelyOffline(error)){queueEntry(payload);closeModal();toast('Offline gespeichert – wird später synchronisiert.');return}
-  return toast(error.message);
- }
- closeModal();await loadData();await detectChallengeCompletions(entryDate);await render();maybeCelebrate(before);
- toast(entryDate===fmtDate()?'Aktivität gespeichert ✓':'Aktivität rückwirkend gespeichert ✓');
+ return submitEntry(async()=>({user_id:me.id,entry_date:selectedEntryDate('quickEntryDate'),kind:'activity',activity,minutes,distance,witness:'Ehrenkodex',witness_user_id:null}));
 }
 
 function almostThereHTML(){let items=[],sel=currentSelection(),c=sel?WEEKLY.find(x=>x.id===sel.challenge_id):null;if(c){let [a,b]=challengeProgressForWeek(c,me.id,weekKey()),left=Math.max(0,b-a);if(left>0&&left<=Math.max(1,b*.34))items.push(`🎯 Noch <b>${left}</b> bis „${escapeHtml(c.title)}“`)}let gc=groupChallengeForPeriod(monthKey()),gv=groupChallengeValueMonth(monthKey()),gl=Math.max(0,gc.target-gv),pct=gv/gc.target;if(gl>0&&pct>=.7)items.push(`👥 Crew fast am Ziel: noch <b>${Number(gl.toFixed?.(1)??gl).toLocaleString('de-DE')} ${escapeHtml(gc.unit||'')}</b>`);let pts=monthRewardPoints(),next=MILESTONES.find(m=>m>pts);if(next&&next-pts<=10)items.push(`🎁 Noch <b>${next-pts} P</b> bis zur nächsten Belohnung`);return items.length?`<div class="card pad almostThere"><b>✨ Fast geschafft</b>${items.map(x=>`<div>${x}</div>`).join('')}</div>`:''}
@@ -775,7 +862,7 @@ function renderShell(){
 }
 async function navs(){
  const mobile=[['home','home','Home'],['group','crew','Crew'],['challenges','challenge','Challenges'],['me','profile','Profil']];
- $('#bottomNav').innerHTML=mobile.map(([id,ic,t])=>`<button class="navBtn ${currentView===id?'active':''}" onclick="go('${id}')">${movoIcon(ic)}<span>${t}</span></button>`).join('');
+ $('#bottomNav').innerHTML=mobile.map(([id,ic,t])=>`<button aria-label="${t}" class="navBtn ${currentView===id?'active':''}" onclick="go('${id}')">${movoIcon(ic)}<span>${t}</span></button>`).join('');
  const desktop=[['home','home','Home'],['group','crew','Crew'],['challenges','challenge','Challenges'],['rewards','reward','Rewards'],['me','profile','Profil'],['history','history','Historie'],['rules','rules','Regeln'],['more','more','Mehr']];
  $('#sideNav').innerHTML=desktop.map(([id,ic,t])=>`<button class="${currentView===id?'active':''}" onclick="go('${id}')">${movoIcon(ic)}<span>${t}</span></button>`).join('');
  let av=await avatarHTML(me,40);
@@ -1057,7 +1144,7 @@ function openActiveChallenge(kind){
   meta=`<div class="notice">${c.targetUser?`<b>Heute für dich ausgelost:</b> Diese Aufgabe bezieht sich auf <b>${escapeHtml(firstName(c.targetUser))}</b>.<br>`:''}<b>Punkte:</b> +1 · ${done?'✓ bereits erledigt':'noch offen'}</div>`;
   if(!done)action=`<button class="cta section" onclick="closeModal();openDailyComplete()">Als erledigt markieren</button>`;
  }
- $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>${escapeHtml(emoji)} ${escapeHtml(title)}</h2><button class="x" onclick="closeModal()">×</button></div><p>${escapeHtml(desc)}</p>${meta}${action}</div></div>`;
+ $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>${escapeHtml(emoji)} ${escapeHtml(title)}</h2><button class="x" aria-label="Schließen" onclick="closeModal()">×</button></div><p>${escapeHtml(desc)}</p>${meta}${action}</div></div>`;
 }
 
 
@@ -1209,7 +1296,7 @@ function previewDailyPhoto(input){
 }
 function openDailyComplete(){
  let c=dailyChallengeFor();if(!c)return;
- $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>${escapeHtml(c.emoji)} Tageschallenge erledigt</h2><button class="x" onclick="closeModal()">×</button></div>
+ $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>${escapeHtml(c.emoji)} Tageschallenge erledigt</h2><button class="x" aria-label="Schließen" onclick="closeModal()">×</button></div>
  <p>${escapeHtml(c.description)}</p>
  <form class="form" onsubmit="completeDaily(event)">
   <div class="field"><label>Was hast du gemacht?</label><textarea id="dailyText" rows="5" required></textarea><div class="tiny muted">Mindestens 3 Zeichen. Beispiel: „Erledigt“, „War gut“ oder mindestens 3 Emojis.</div></div>
@@ -1377,7 +1464,7 @@ async function openCrewMember(userId){
   ...(b.other?[['⭐','Weitere Ranglistenpunkte',b.other]]:[])
  ].filter(x=>x[2]>0);
  $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard crewMemberModal">
-  <div class="modalHead"><h2>Crew-Woche</h2><button class="x" onclick="closeModal()">×</button></div>
+  <div class="modalHead"><h2>Crew-Woche</h2><button class="x" aria-label="Schließen" onclick="closeModal()">×</button></div>
   <div class="crewMemberHero">${av}<div><h2>${escapeHtml(firstName(p))}</h2><span class="muted">KW ${isoWeek(new Date())}</span></div><strong>${b.total} P</strong></div>
   <div class="crewBreakdown">${rows.length?rows.map(([icon,label,pts])=>`<div><span class="crewBreakIcon">${icon}</span><b>${label}</b><strong>+${pts} P</strong></div>`).join(''):'<div class="muted">Diese Woche noch keine Ranglistenpunkte gesammelt.</div>'}</div>
   ${b.movoBonus?`<div class="notice small section">🔥 <b>+${b.movoBonus} Movo-Bonus</b> aus Streak-Meilensteinen · zählt für Belohnungen, nicht fürs Ranking.</div>`:''}
@@ -1490,9 +1577,9 @@ function reactionButtonClick(type,id,ownerId){if(reactionHoldOpened){reactionHol
 function openReactionPicker(type,id,ownerId){cancelReactionHold();let rows=reactionRows(type,id),mine=new Set(rows.filter(r=>r.user_id===me.id).map(r=>r.emoji));$('#modalRoot').innerHTML=`<div class="reactionOverlay" onclick="closeModal()"><div class="reactionPicker" onclick="event.stopPropagation()">${['❤️','🔥','👏','💪','😂'].map(em=>`<button class="${mine.has(em)?'active':''}" onclick="toggleFeedReaction('${type}','${id}','${em}','${ownerId||''}');closeModal()">${em}</button>`).join('')}</div></div>`}
 async function ensureHeart(type,id,ownerId){let exists=feedReactions.find(r=>r.item_type===type&&r.item_id===id&&r.user_id===me.id&&r.emoji==='❤️');if(exists)return;let {error}=await sb.from('feed_reactions').insert({item_type:type,item_id:id,user_id:me.id,emoji:'❤️'});if(error)return toast(error.message);if(ownerId&&ownerId!==me.id&&prefFor(ownerId).notify_reactions)notifyUser(ownerId,`${firstName(me)} gefällt dein Tag ❤️`,'Auf deinen Movo-Tag','reactions');await loadData();await render();pointlessHeartBurst()}
 function pointlessHeartBurst(){let e=document.createElement('div');e.className='heartBurst';e.textContent='❤️';document.body.append(e);setTimeout(()=>e.remove(),800)}
-function openReactionDetails(type,id){let rows=reactionRows(type,id);$('#modalRoot').innerHTML=`<div class="modal sheetModal" onclick="if(event.target===this)closeModal()"><div class="modalCard socialSheet"><div class="modalHead"><h2>Reaktionen</h2><button class="x" onclick="closeModal()">${movoIcon('close')}</button></div><div class="reactionPeople">${rows.map(r=>{let p=profileById(r.user_id);return `<div><span>${r.emoji}</span><b>${escapeHtml(firstName(p))}</b></div>`}).join('')}</div></div></div>`}
+function openReactionDetails(type,id){let rows=reactionRows(type,id);$('#modalRoot').innerHTML=`<div class="modal sheetModal" onclick="if(event.target===this)closeModal()"><div class="modalCard socialSheet"><div class="modalHead"><h2>Reaktionen</h2><button class="x" aria-label="Schließen" onclick="closeModal()">${movoIcon('close')}</button></div><div class="reactionPeople">${rows.map(r=>{let p=profileById(r.user_id);return `<div><span>${r.emoji}</span><b>${escapeHtml(firstName(p))}</b></div>`}).join('')}</div></div></div>`}
 function commentPreviewHTML(type,id,ownerId){let cs=commentsFor(type,id),last=cs.at(-1);return `<div class="commentPreview">${last?`<button class="lastComment" onclick="openCommentsSheet('${type}','${id}','${ownerId||''}')"><b>${escapeHtml(firstName(profileById(last.user_id)))}</b><span>${escapeHtml(last.comment)}</span></button>`:''}<button class="commentLink" onclick="openCommentsSheet('${type}','${id}','${ownerId||''}')">${movoIcon('comment')}<span>${cs.length?cs.length===1?'1 Kommentar':`Alle ${cs.length} Kommentare ansehen`:'Kommentar hinzufügen'}</span></button></div>`}
-function openCommentsSheet(type,id,ownerId){let cs=commentsFor(type,id);$('#modalRoot').innerHTML=`<div class="modal sheetModal" onclick="if(event.target===this)closeModal()"><div class="modalCard commentSheet"><div class="modalHead"><h2>Kommentare</h2><button class="x" onclick="closeModal()">${movoIcon('close')}</button></div><div class="commentList">${cs.length?cs.map(c=>{let p=profileById(c.user_id);return `<div class="commentItem"><div class="commentAvatar">${escapeHtml(firstName(p).slice(0,1))}</div><div><b>${escapeHtml(firstName(p))}</b><p>${escapeHtml(c.comment)}</p></div>${c.user_id===me.id?`<button onclick="deleteCommentFromSheet('${c.id}','${type}','${id}','${ownerId||''}')">${movoIcon('close')}</button>`:''}</div>`}).join(''):'<div class="emptySocial">Noch keine Kommentare. Starte die Unterhaltung.</div>'}</div><form class="commentComposer" onsubmit="addCommentFromSheet(event,'${type}','${id}','${ownerId||''}')"><input maxlength="240" placeholder="Kommentar hinzufügen …" required><button>${movoIcon('plus')}</button></form></div></div>`}
+function openCommentsSheet(type,id,ownerId){let cs=commentsFor(type,id);$('#modalRoot').innerHTML=`<div class="modal sheetModal" onclick="if(event.target===this)closeModal()"><div class="modalCard commentSheet"><div class="modalHead"><h2>Kommentare</h2><button class="x" aria-label="Schließen" onclick="closeModal()">${movoIcon('close')}</button></div><div class="commentList">${cs.length?cs.map(c=>{let p=profileById(c.user_id);return `<div class="commentItem"><div class="commentAvatar">${escapeHtml(firstName(p).slice(0,1))}</div><div><b>${escapeHtml(firstName(p))}</b><p>${escapeHtml(c.comment)}</p></div>${c.user_id===me.id?`<button onclick="deleteCommentFromSheet('${c.id}','${type}','${id}','${ownerId||''}')">${movoIcon('close')}</button>`:''}</div>`}).join(''):'<div class="emptySocial">Noch keine Kommentare. Starte die Unterhaltung.</div>'}</div><form class="commentComposer" onsubmit="addCommentFromSheet(event,'${type}','${id}','${ownerId||''}')"><input maxlength="240" placeholder="Kommentar hinzufügen …" required><button>${movoIcon('plus')}</button></form></div></div>`}
 async function addCommentFromSheet(ev,type,id,ownerId){ev.preventDefault();let input=ev.target.querySelector('input'),comment=input.value.trim();if(!comment)return;let {error}=await sb.from('feed_comments').insert({user_id:me.id,item_type:type,item_id:id,comment});if(error)return toast(error.message);if(ownerId&&ownerId!==me.id&&prefFor(ownerId).notify_reactions)notifyUser(ownerId,`${firstName(me)} hat kommentiert`,comment,'reactions');await loadData();await render();openCommentsSheet(type,id,ownerId)}
 async function deleteCommentFromSheet(commentId,type,id,ownerId){let {error}=await sb.from('feed_comments').delete().eq('id',commentId).eq('user_id',me.id);if(error)return toast(error.message);await loadData();await render();openCommentsSheet(type,id,ownerId)}
 
@@ -1552,10 +1639,10 @@ function setPoolSearch(v){challengePoolSearch=v;let el=$('#challengePoolResults'
 function challengePoolResultsHTML(){let q=challengePoolSearch.trim().toLowerCase(),list=challengePool.filter(c=>poolAvailable(c)&&(challengePoolType==='all'||c.challenge_type===challengePoolType)&&(challengePoolCategory==='all'||challengeCategory(c)===challengePoolCategory)&&(!q||((c.name||'')+' '+(c.description||'')).toLowerCase().includes(q)));return `<div class="poolCount">${list.length} von ${challengePool.filter(poolAvailable).length}</div><div class="poolList">${list.map(c=>{let r=ratings.filter(x=>x.challenge_pool_id===c.id),creator=profileById(c.created_by),cat=challengeCategory(c);return `<button class="poolItem" onclick="openChallengeDetail('${c.id}')"><span class="poolIcon">${c.challenge_type==='daily'?movoIcon('daily'):c.challenge_type==='weekly'?movoIcon('challenge'):movoIcon('crew')}</span><div><b>${escapeHtml(c.name)}</b><small>${escapeHtml(dailyTemplateText(c.description,null))}</small><em>${c.challenge_type==='group'?'Crew':c.challenge_type==='weekly'?'Weekly':'Daily'} · ${cat==='move'?'Bewegung':cat==='food'?'Ernährung':cat==='social'?'Sozial':'Sonstiges'}${creator?` · von ${escapeHtml(firstName(creator))}`:''}</em></div><span class="poolRating">👍 ${r.filter(x=>x.rating==='again').length}</span></button>`}).join('')||'<div class="emptyState">Keine Challenges für diesen Filter.</div>'}</div>`}
 
 function challengePoolHTML(){return `<div class="poolToolbar"><label class="poolSearch">${movoIcon('search')}<input type="search" value="${escapeHtml(challengePoolSearch)}" placeholder="Challenges durchsuchen …" oninput="setPoolSearch(this.value)"></label><div class="filterGroup"><span>Typ</span>${[['all','Alle'],['daily','Daily'],['weekly','Weekly'],['group','Crew']].map(([v,l])=>`<button class="${challengePoolType===v?'active':''}" onclick="setPoolFilter('type','${v}')">${l}</button>`).join('')}</div><div class="filterGroup"><span>Kategorie</span>${[['all','Alle'],['move','Bewegung'],['food','Ernährung'],['social','Sozial'],['other','Sonstiges']].map(([v,l])=>`<button class="${challengePoolCategory===v?'active':''}" onclick="setPoolFilter('category','${v}')">${l}</button>`).join('')}</div></div><div id="challengePoolResults">${challengePoolResultsHTML()}</div>`}
-function openChallengeDetail(id){let c=challengePool.find(x=>x.id===id),r=ratings.filter(x=>x.challenge_pool_id===id),creator=profileById(c.created_by),poolDesc=dailyTemplateText(c.description,null);$('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>${escapeHtml(c.emoji)} ${escapeHtml(c.name)}</h2><button class="x" onclick="closeModal()">×</button></div><p>${escapeHtml(poolDesc)}</p><div class="notice"><b>Typ:</b> ${escapeHtml(c.challenge_type)}<br><b>Punkte:</b> +${c.points}${c.challenge_type==='daily'&&c.daily_target_mode==='group_other'?'<br><b>Crew-Bezug:</b> Movo lost täglich eine andere Person aus.':''}${c.target_value?`<br><b>Ziel:</b> ${c.target_value} ${escapeHtml(c.target_unit||'')}`:''}${creator?`<br><b>Vorgeschlagen von:</b> ${escapeHtml(firstName(creator))}`:''}</div><div class="section"><b>Bewertungen nach Durchführung</b><div class="reactions"><span class="react">👍 ${r.filter(x=>x.rating==='again').length}</span><span class="react">😐 ${r.filter(x=>x.rating==='okay').length}</span><span class="react">👎 ${r.filter(x=>x.rating==='never').length}</span></div></div><div class="section"><b>Wie fandest du diese Challenge?</b><div class="reactions"><button class="react" onclick="rateChallenge('${c.id}','again')">👍 Gerne wieder</button><button class="react" onclick="rateChallenge('${c.id}','okay')">😐 War okay</button><button class="react" onclick="rateChallenge('${c.id}','never')">👎 Nicht nochmal</button></div></div>${me.is_admin?`<div class="section"><b>Admin</b><div class="uploadBtns"><button class="secondary" onclick="adminSuspendChallenge('${c.id}')">⏸ Sperren</button>${!poolAvailable(c)?`<button class="secondary" onclick="adminUnsuspendChallenge('${c.id}')">▶ Entsperren</button>`:''}<button class="secondary danger" onclick="adminDeleteChallenge('${c.id}')">🗑 Entfernen</button></div></div>`:''}</div></div>`}
+function openChallengeDetail(id){let c=challengePool.find(x=>x.id===id),r=ratings.filter(x=>x.challenge_pool_id===id),creator=profileById(c.created_by),poolDesc=dailyTemplateText(c.description,null);$('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>${escapeHtml(c.emoji)} ${escapeHtml(c.name)}</h2><button class="x" aria-label="Schließen" onclick="closeModal()">×</button></div><p>${escapeHtml(poolDesc)}</p><div class="notice"><b>Typ:</b> ${escapeHtml(c.challenge_type)}<br><b>Punkte:</b> +${c.points}${c.challenge_type==='daily'&&c.daily_target_mode==='group_other'?'<br><b>Crew-Bezug:</b> Movo lost täglich eine andere Person aus.':''}${c.target_value?`<br><b>Ziel:</b> ${c.target_value} ${escapeHtml(c.target_unit||'')}`:''}${creator?`<br><b>Vorgeschlagen von:</b> ${escapeHtml(firstName(creator))}`:''}</div><div class="section"><b>Bewertungen nach Durchführung</b><div class="reactions"><span class="react">👍 ${r.filter(x=>x.rating==='again').length}</span><span class="react">😐 ${r.filter(x=>x.rating==='okay').length}</span><span class="react">👎 ${r.filter(x=>x.rating==='never').length}</span></div></div><div class="section"><b>Wie fandest du diese Challenge?</b><div class="reactions"><button class="react" onclick="rateChallenge('${c.id}','again')">👍 Gerne wieder</button><button class="react" onclick="rateChallenge('${c.id}','okay')">😐 War okay</button><button class="react" onclick="rateChallenge('${c.id}','never')">👎 Nicht nochmal</button></div></div>${me.is_admin?`<div class="section"><b>Admin</b><div class="uploadBtns"><button class="secondary" onclick="adminSuspendChallenge('${c.id}')">⏸ Sperren</button>${!poolAvailable(c)?`<button class="secondary" onclick="adminUnsuspendChallenge('${c.id}')">▶ Entsperren</button>`:''}<button class="secondary danger" onclick="adminDeleteChallenge('${c.id}')">🗑 Entfernen</button></div></div>`:''}</div></div>`}
 async function rateChallenge(id,rating){let old=ratings.find(x=>x.challenge_pool_id===id&&x.user_id===me.id&&x.week_key===weekKey()),payload={challenge_pool_id:id,user_id:me.id,week_key:weekKey(),rating},q=old?sb.from('challenge_ratings').update({rating}).eq('id',old.id):sb.from('challenge_ratings').insert(payload),{error}=await q;if(error)return toast(error.message);closeModal();await loadData();await render();toast('Bewertung gespeichert')}
 function openProposal(){
- $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>Neue Challenge vorschlagen</h2><button class="x" onclick="closeModal()">×</button></div><form class="form section" onsubmit="submitProposal(event)">
+ $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>Neue Challenge vorschlagen</h2><button class="x" aria-label="Schließen" onclick="closeModal()">×</button></div><form class="form section" onsubmit="submitProposal(event)">
  <div class="field"><label>Typ</label><select id="prType" onchange="proposalTypeChanged()"><option value="weekly">Wochenchallenge</option><option value="group">Crew-Challenge</option><option value="daily">Tageschallenge</option></select></div>
  <div class="field hidden" id="prDailyModeWrap"><label>Art der Tageschallenge</label><select id="prDailyMode"><option value="general">Allgemein</option><option value="group_other">Bezieht sich auf eine andere Person der Crew</option></select><div class="tiny muted">Bei Crew-Bezug lost Movo täglich automatisch eine andere Person aus. Die Aufgabe sollte deshalb auch per Nachricht, Anruf oder aus der Ferne machbar sein. Nutze in der Beschreibung <b>{person}</b> als Platzhalter.</div></div>
  <div class="field"><label>Name</label><input id="prName" required maxlength="60"></div>
@@ -1625,7 +1712,7 @@ async function rewardGroupCardHTML(p){
   ${unchosen.length?`<div class="notice small sectionTiny">${unchosen.length} Belohnung${unchosen.length===1?'':'en'} noch auszuwählen.</div>`:''}
  </div>`;
 }
-async function rewardsHTML(){let bal=wishCreditBalanceCents(me.id),life=lifetimePoints(me.id),next=highestWishThreshold(me.id)+100,remaining=Math.max(0,next-life),monthPts=monthRewardPoints(),open=openRewardChoices(),body='';if(rewardUiTab==='rewards')body=`${open.length?`<div class="sectionHead"><div><span>JETZT</span><h2>Bereit zum Einlösen</h2></div></div><div class="readyRewards">${open.map(rewardReadyCard).join('')}</div>`:''}<div class="sectionHead"><div><span>DIESER MONAT</span><h2>Deine nächsten Erlebnisse</h2></div><span>${monthPts} P</span></div><div class="milestoneCatalog">${rewardMilestoneCatalogHTML(monthPts)}</div><details class="softDetails"><summary>Alle Belohnungen & Vorschläge <span>›</span></summary><div>${rewardsRulesHTML()}</div></details>`;else body=`<section class="panel"><div class="panelHead"><div><span>VERLAUF</span><h2>Meine Einlösungen</h2></div></div>${ownWishHistoryHTML()}</section>`;return `<section class="screen rewardsScreen"><header class="hero heroRewards"><div class="pageHero"><div><h1>Rewards</h1><p>Dein Einsatz wird zu gemeinsamen Erlebnissen.</p></div><span class="heroPoints">${life} P</span></div></header><div class="rewardsLayout"><section class="creditCard"><div><span>WUNSCH-GUTHABEN</span><b>${euro(bal)}</b><small>${remaining} P bis +5,00 €</small></div><button ${bal<=0?'disabled':''} onclick="openWishRedeem()">Einlösen</button></section><div class="tabsPanel">${rewardTabsHTML()}</div>${body}</div></section>`}
+async function rewardsHTML(){let bal=wishCreditBalanceCents(me.id),life=lifetimePoints(me.id),next=highestWishThreshold(me.id)+100,remaining=Math.max(0,next-life),monthPts=monthRewardPoints(),open=openRewardChoices(),body='';if(rewardUiTab==='rewards')body=`${open.length?`<div class="sectionHead"><div><span>JETZT</span><h2>Bereit zum Einlösen</h2></div></div><div class="readyRewards">${open.map(rewardReadyCard).join('')}</div>`:''}<div class="sectionHead"><div><span>DIESER MONAT</span><h2>Deine nächsten Erlebnisse</h2></div><span>${monthPts} P</span></div><div class="milestoneCatalog">${rewardMilestoneCatalogHTML(monthPts)}</div><details class="softDetails"><summary>Alle Belohnungen & Vorschläge <span>›</span></summary><div>${rewardsRulesHTML()}</div></details>`;else body=`<section class="panel"><div class="panelHead"><div><span>VERLAUF</span><h2>Meine Einlösungen</h2></div></div>${ownWishHistoryHTML()}</section>`;return `<section class="screen rewardsScreen"><header class="hero heroRewards"><div class="pageHero"><div><h1>Rewards</h1><p>Dein Einsatz wird zu gemeinsamen Erlebnissen.</p></div><span class="heroPoints">${life} P</span></div></header><div class="rewardsLayout"><section class="creditCard"><div><span>WUNSCH-GUTHABEN</span><b>${euro(bal)}</b><small>${remaining} P bis +5,00 €</small></div><button ${bal<=0&&!pendingWishSpend()?'disabled':''} onclick="openWishRedeem()">Einlösen</button></section><div class="tabsPanel">${rewardTabsHTML()}</div>${body}</div></section>`}
 
 
 function mockBadgeGridHTML(){return badgeGridHTML()}
@@ -1751,10 +1838,10 @@ function rewardsRulesHTML(){
 }
 function openRewardDetail(id){
  let r=rewardPool.find(x=>x.id===id);if(!r)return;
- $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>🎁 ${escapeHtml(r.name)}</h2><button class="x" onclick="closeModal()">×</button></div><p>${escapeHtml(r.description||'')}</p>${(()=>{let v=rewardPoolVoteCounts(r.id),mine=myRewardPoolVote(r.id);return `<div class="notice"><b>Punkte:</b> ${r.points_required}<br><b>Status:</b> ${r.active?'Aktiv':'Deaktiviert'}<br><b>Crew-Meinung:</b> 👍 ${v.yes} · 👎 ${v.no}</div><div class="reactions"><button class="react ${mine?.vote===true?'active':''}" onclick="voteRewardPool('${r.id}',true)">👍 Dafür</button><button class="react ${mine?.vote===false?'active':''}" onclick="voteRewardPool('${r.id}',false)">👎 Dagegen</button></div>`})()}${me.is_admin?`<div class="section"><b>Admin</b><div class="uploadBtns"><button class="secondary" onclick="toggleReward('${r.id}',${!r.active})">${r.active?'⏸ Deaktivieren':'▶ Aktivieren'}</button><button class="secondary danger" onclick="deleteReward('${r.id}')">🗑 Entfernen</button></div></div>`:''}</div></div>`
+ $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>🎁 ${escapeHtml(r.name)}</h2><button class="x" aria-label="Schließen" onclick="closeModal()">×</button></div><p>${escapeHtml(r.description||'')}</p>${(()=>{let v=rewardPoolVoteCounts(r.id),mine=myRewardPoolVote(r.id);return `<div class="notice"><b>Punkte:</b> ${r.points_required}<br><b>Status:</b> ${r.active?'Aktiv':'Deaktiviert'}<br><b>Crew-Meinung:</b> 👍 ${v.yes} · 👎 ${v.no}</div><div class="reactions"><button class="react ${mine?.vote===true?'active':''}" onclick="voteRewardPool('${r.id}',true)">👍 Dafür</button><button class="react ${mine?.vote===false?'active':''}" onclick="voteRewardPool('${r.id}',false)">👎 Dagegen</button></div>`})()}${me.is_admin?`<div class="section"><b>Admin</b><div class="uploadBtns"><button class="secondary" onclick="toggleReward('${r.id}',${!r.active})">${r.active?'⏸ Deaktivieren':'▶ Aktivieren'}</button><button class="secondary danger" onclick="deleteReward('${r.id}')">🗑 Entfernen</button></div></div>`:''}</div></div>`
 }
 function openRewardProposal(){
- $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>🎁 Neue Belohnung vorschlagen</h2><button class="x" onclick="closeModal()">×</button></div><form class="form section" onsubmit="submitRewardProposal(event)"><div class="field"><label>Name</label><input id="rpName" required maxlength="80"></div><div class="field"><label>Beschreibung</label><textarea id="rpDesc" rows="4" required maxlength="400"></textarea></div><div class="field"><label>Punkte-Ziel</label><select id="rpPoints">${MILESTONES.map(m=>`<option value="${m}">${m} Punkte</option>`).join('')}</select></div><button class="cta">Zur Abstimmung stellen</button></form></div></div>`
+ $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>🎁 Neue Belohnung vorschlagen</h2><button class="x" aria-label="Schließen" onclick="closeModal()">×</button></div><form class="form section" onsubmit="submitRewardProposal(event)"><div class="field"><label>Name</label><input id="rpName" required maxlength="80"></div><div class="field"><label>Beschreibung</label><textarea id="rpDesc" rows="4" required maxlength="400"></textarea></div><div class="field"><label>Punkte-Ziel</label><select id="rpPoints">${MILESTONES.map(m=>`<option value="${m}">${m} Punkte</option>`).join('')}</select></div><button class="cta">Zur Abstimmung stellen</button></form></div></div>`
 }
 async function submitRewardProposal(e){
  e.preventDefault();
@@ -1876,7 +1963,7 @@ async function exportBackup(){
  try{let backup=await buildBackup();downloadBackupObject(backup,'manual');await logAdmin('backup_exported',{tables:Object.keys(backup.tables)});toast('Backup erstellt ✓')}catch(err){toast(err.message)}
 }
 function openRestoreDialog(){
- $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>📥 Backup wiederherstellen</h2><button class="x" onclick="closeModal()">×</button></div><div class="error small"><b>Achtung:</b> Restore verändert Daten in der zentralen Datenbank. Vorher wird automatisch ein aktuelles Backup heruntergeladen.</div><div class="field section"><label>Movo-Backup (.json)</label><input id="restoreFile" type="file" accept=".json,application/json"></div><button class="cta" onclick="restoreBackup()">Backup prüfen & wiederherstellen</button></div></div>`
+ $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>📥 Backup wiederherstellen</h2><button class="x" aria-label="Schließen" onclick="closeModal()">×</button></div><div class="error small"><b>Achtung:</b> Restore verändert Daten in der zentralen Datenbank. Vorher wird automatisch ein aktuelles Backup heruntergeladen.</div><div class="field section"><label>Movo-Backup (.json)</label><input id="restoreFile" type="file" accept=".json,application/json"></div><button class="cta" onclick="restoreBackup()">Backup prüfen & wiederherstellen</button></div></div>`
 }
 async function restoreBackup(){
  let f=$('#restoreFile')?.files?.[0];if(!f)return toast('Bitte Backup-Datei auswählen.');
@@ -1899,7 +1986,7 @@ function openResetDialog(mode){
   full:{title:'Kompletter Movo-Datenreset',desc:'Löscht nahezu alle Movo-Inhalte außer Benutzerkonten, Admin-/Freischaltungsstatus und der technischen Grundstruktur. Challenge-Pool wird auf Systemdaten reduziert.',word:'FULLRESET'}
  };
  let d=defs[mode];
- $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>⚠️ ${d.title}</h2><button class="x" onclick="closeModal()">×</button></div><div class="error">${d.desc}<br><br><b>Vor dem Reset wird automatisch ein Komplett-Backup heruntergeladen.</b></div><div class="field section"><label>Zur Bestätigung exakt <b>${d.word}</b> eingeben</label><input id="resetConfirm"></div><button class="cta danger" onclick="executeReset('${mode}','${d.word}')">Backup erstellen & Reset ausführen</button></div></div>`
+ $('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>⚠️ ${d.title}</h2><button class="x" aria-label="Schließen" onclick="closeModal()">×</button></div><div class="error">${d.desc}<br><br><b>Vor dem Reset wird automatisch ein Komplett-Backup heruntergeladen.</b></div><div class="field section"><label>Zur Bestätigung exakt <b>${d.word}</b> eingeben</label><input id="resetConfirm"></div><button class="cta danger" onclick="executeReset('${mode}','${d.word}')">Backup erstellen & Reset ausführen</button></div></div>`
 }
 const TABLE_CLEAR_KEYS={
  profiles:['id','00000000-0000-0000-0000-000000000000'],
@@ -1962,7 +2049,7 @@ async function setApproval(userId,allow){
 
 function openEntry(kind='activity',edit=null,dateOverride=null){
  let initialKind=edit?.kind||kind;if(!['activity','steps','food'].includes(initialKind))initialKind='activity';let date=edit?.entry_date||dateOverride||entryDateBounds().max;
- $('#modalRoot').innerHTML=`<div class="modal sheetModal" onclick="if(event.target===this)closeModal()"><div class="modalCard entrySheet"><div class="modalHead"><div><small>EINTRAGEN</small><h2>${edit?'Eintrag bearbeiten':initialKind==='activity'?'Aktivität':initialKind==='steps'?'Schritte':'Ernährung'}</h2></div><button class="x" onclick="closeModal()">${movoIcon('close')}</button></div><div class="entryTypeTabs"><button class="${initialKind==='activity'?'active':''}" onclick="entryTab('activity',this,'${date}')">${movoIcon('activity')} Aktivität</button><button class="${initialKind==='steps'?'active':''}" onclick="entryTab('steps',this,'${date}')">${movoIcon('steps')} Schritte</button><button class="${initialKind==='food'?'active':''}" onclick="entryTab('food',this,'${date}')">${movoIcon('food')} Ernährung</button></div><div id="entryForm" class="section">${entryForm(initialKind,edit,date)}</div></div></div>`;setTimeout(()=>wireDynamic(edit),0);
+ $('#modalRoot').innerHTML=`<div class="modal sheetModal" onclick="if(event.target===this)closeModal()"><div class="modalCard entrySheet"><div class="modalHead"><div><small>EINTRAGEN</small><h2>${edit?'Eintrag bearbeiten':initialKind==='activity'?'Aktivität':initialKind==='steps'?'Schritte':'Ernährung'}</h2></div><button class="x" aria-label="Schließen" onclick="closeModal()">${movoIcon('close')}</button></div><div class="entryTypeTabs"><button class="${initialKind==='activity'?'active':''}" onclick="entryTab('activity',this)">${movoIcon('activity')} Aktivität</button><button class="${initialKind==='steps'?'active':''}" onclick="entryTab('steps',this)">${movoIcon('steps')} Schritte</button><button class="${initialKind==='food'?'active':''}" onclick="entryTab('food',this)">${movoIcon('food')} Ernährung</button></div><div id="entryForm" class="section">${entryForm(initialKind,edit,date)}</div></div></div>`;setTimeout(()=>wireDynamic(edit),0);
 }
 function entryTab(kind,btn,dateOverride=null){
  $$('.modal .entryTypeTabs button').forEach(x=>x.classList.remove('active'));btn?.classList.add('active');let date=dateOverride||$('#entryDate')?.value||entryHubDate||entryDateBounds().max;$('#entryForm').innerHTML=entryForm(kind,null,date);wireDynamic();
@@ -1983,8 +2070,8 @@ function selectedEntryDate(id='entryDate'){
 
 function entryForm(kind,e=null,dateOverride=null){
  let selectedDate=e?.entry_date||dateOverride||entryDateBounds().max;
- if(kind==='activity'){let a=e?.activity||'walk';return `<form class="form twoMobile" onsubmit="saveActivity(event,'${e?.id||''}')">${entryDateField(e,'entryDate',selectedDate)}<div class="field"><label>Aktivität</label><select id="aType" onchange="wireDynamic()">${Object.entries(ACTIVITIES).map(([k,x])=>`<option value="${k}" ${k===a?'selected':''}>${x.icon} ${x.name}</option>`).join('')}</select></div><div class="field"><label>Dauer (Min.)</label><input id="aMinutes" type="number" min="0" value="${e?.minutes||30}" oninput="livePts()"></div><div class="field" id="distWrap"><label>Distanz (km)</label><input id="aDistance" type="number" step=".1" min="0" value="${e?.distance||''}" oninput="livePts()"></div><div class="field"><label>Zeuge</label><select id="aWitness"><option value="honor" ${!e?.witness_user_id?'selected':''}>Ehrenkodex</option>${profiles.filter(p=>p.id!==me.id).map(p=>`<option value="${p.id}" ${e?.witness_user_id===p.id?'selected':''}>${escapeHtml(p.first_name)}</option>`).join('')}</select><div class="tiny muted">Bei einer Person erscheint eine freiwillige Zeugenanfrage.</div></div><div class="full"><label class="strong small">Optionaler Bildnachweis</label><label class="uploadBtn primaryUpload">${movoIcon('camera')} Foto hinzufügen<input hidden type="file" accept="image/*" onchange="proofFile(this)"></label><img id="proofPreview" class="photoPreview hidden"></div><div id="livePts" class="notice full"></div><button class="cta full">${e?'Speichern':'Aktivität speichern'}</button></form>`}
- if(kind==='steps'){let existing=e||entries.find(x=>x.user_id===me.id&&x.entry_date===selectedDate&&x.kind==='steps');return `<form class="form" onsubmit="saveSteps(event,'${existing?.id||''}')">${entryDateField(existing,'entryDate',selectedDate)}<div class="field"><label>Schritte</label><input id="sSteps" type="number" min="0" value="${existing?.steps||''}" oninput="stepHint()" required></div><div id="stepHint" class="notice">Wird automatisch auf volle 100 abgerundet.</div><button class="cta">Schritte speichern</button></form>`}
+ if(kind==='activity'){let a=e?.activity||'walk';return `<form class="form twoMobile" onsubmit="saveActivity(event,'${e?.id||''}')">${entryDateField(e,'entryDate',selectedDate)}<div class="field"><label for="aType">Aktivität</label><select id="aType" onchange="wireDynamic()">${Object.entries(ACTIVITIES).map(([k,x])=>`<option value="${k}" ${k===a?'selected':''}>${x.icon} ${x.name}</option>`).join('')}</select></div><div class="field"><label for="aMinutes">Dauer (Min.)</label><input id="aMinutes" type="number" min="0" value="${e?.minutes||30}" oninput="livePts()"></div><div class="field" id="distWrap"><label for="aDistance">Distanz (km)</label><input id="aDistance" type="number" step=".1" min="0" value="${e?.distance||''}" oninput="livePts()"></div><div class="field"><label for="aWitness">Zeuge</label><select id="aWitness"><option value="honor" ${!e?.witness_user_id?'selected':''}>Ehrenkodex</option>${profiles.filter(p=>p.id!==me.id).map(p=>`<option value="${p.id}" ${e?.witness_user_id===p.id?'selected':''}>${escapeHtml(p.first_name)}</option>`).join('')}</select><div class="tiny muted">Bei einer Person erscheint eine freiwillige Zeugenanfrage.</div></div><div class="full"><label class="strong small">Optionaler Bildnachweis</label><label class="uploadBtn primaryUpload">${movoIcon('camera')} Foto hinzufügen<input hidden type="file" accept="image/*" onchange="proofFile(this)"></label><img id="proofPreview" class="photoPreview hidden"></div><div id="livePts" class="notice full"></div><button class="cta full">${e?'Speichern':'Aktivität speichern'}</button></form>`}
+ if(kind==='steps'){let existing=e||entries.find(x=>x.user_id===me.id&&x.entry_date===selectedDate&&x.kind==='steps');return `<form class="form" onsubmit="saveSteps(event,'${existing?.id||''}')">${entryDateField(existing,'entryDate',selectedDate)}<div class="field"><label for="sSteps">Schritte</label><input id="sSteps" type="number" min="0" value="${existing?.steps||''}" oninput="stepHint()" required></div><div id="stepHint" class="notice">Wird automatisch auf volle 100 abgerundet.</div><button class="cta">Schritte speichern</button></form>`}
  let existing=e||entries.find(x=>x.user_id===me.id&&x.entry_date===selectedDate&&x.kind==='food');return `<form class="form" onsubmit="saveFood(event,'${existing?.id||''}')">${entryDateField(existing,'entryDate',selectedDate)}<div class="notice"><b>${existing?'Dein bestehender Tages-Check-in.':'Ein Tages-Check-in.'}</b> Die bereits gespeicherten Ziele sind vorausgewählt.</div><div class="foodGoalGrid">${FOOD.map(f=>`<label class="foodGoal"><input type="checkbox" name="food" value="${f.id}" ${(existing?.food_items||[]).includes(f.id)?'checked':''}><span class="checkMark">${movoIcon('check')}</span><span><b>${f.icon} ${f.title}</b><small>${f.desc}</small></span></label>`).join('')}</div><div><label class="strong small">Optionales Foto</label><label class="uploadBtn primaryUpload">${movoIcon('camera')} Foto hinzufügen<input hidden type="file" accept="image/*" onchange="proofFile(this)"></label><img id="proofPreview" class="photoPreview hidden"></div><button class="cta">Ernährung speichern</button></form>`;
 }
 function wireDynamic(edit){let a=$('#aType');if(!a)return;let x=ACTIVITIES[a.value];$('#distWrap')?.classList.toggle('hidden',!x.distance);livePts()}
@@ -1994,73 +2081,40 @@ function proofFile(input){let f=input.files?.[0];pendingProof=f||null;if(f){let 
 async function uploadProof(file){if(!file)return null;let ext=(file.name.split('.').pop()||'jpg').toLowerCase(),path=`${me.id}/${Date.now()}-${crypto.randomUUID()}.${ext}`;let {error}=await sb.storage.from('proofs').upload(path,file,{upsert:false});if(error)throw error;return path}
 async function saveActivity(ev,id=''){
  ev.preventDefault();
- let before=celebrationSnapshot(),a=$('#aType').value,min=+$('#aMinutes').value,
-     dist=$('#aDistance')&&!$('#distWrap').classList.contains('hidden')?+$('#aDistance').value:null,
-     rawW=$('#aWitness').value,witnessId=rawW==='honor'?null:rawW,
-     witnessName=witnessId?firstName(profileById(witnessId)):'Ehrenkodex',photo=null,
-     entryDate=id?entries.find(x=>x.id===id).entry_date:selectedEntryDate();
- try{
-  if(pendingProof)photo=await uploadProof(pendingProof);
-  let payload={user_id:me.id,entry_date:entryDate,kind:'activity',activity:a,minutes:min,distance:dist,witness:witnessName,witness_user_id:witnessId,points:calcCappedActivityPoints(me.id,entryDate,a,min,dist,id||null)};
-  if(photo)payload.photo_path=photo;
-  let res=id?await sb.from('entries').update(payload).eq('id',id).eq('user_id',me.id).select().single():await sb.from('entries').insert(payload).select().single();
-  if(res.error)throw res.error;
-  let entry=res.data;
-  if(witnessId){
-   let wr=await sb.from('witness_confirmations').upsert({entry_id:entry.id,entry_owner_id:me.id,witness_user_id:witnessId,status:'pending',responded_at:null},{onConflict:'entry_id'});
-   if(wr.error)console.warn(wr.error);
-   if(prefFor(witnessId).notify_witness)notifyUser(witnessId,`${firstName(me)} nennt dich als Zeuge 👀`,`${ACTIVITIES[a]?.name||'Aktivität'} · ${min} Min. · ${new Date(entryDate+'T12:00').toLocaleDateString('de-DE')}`,'witness')
-  }else await sb.from('witness_confirmations').delete().eq('entry_id',entry.id).eq('entry_owner_id',me.id);
-  pendingProof=null;closeModal();await loadData();await detectChallengeCompletions(entryDate);await render();floatPoints(payload.points);maybeCelebrate(before);toast(entryDate===fmtDate()?'Gespeichert ✓':'Rückwirkend gespeichert ✓');
- }catch(err){
-  if(likelyOffline(err)&&!photo){
-   let payload={user_id:me.id,entry_date:entryDate,kind:'activity',activity:a,minutes:min,distance:dist,witness:witnessName,witness_user_id:witnessId,points:calcCappedActivityPoints(me.id,entryDate,a,min,dist,id||null)};
-   queueEntry(payload,id?'update':'insert',id||null);pendingProof=null;closeModal();await render();return toast('Offline gespeichert – wird später synchronisiert.');
-  }
-  toast(err.message);
- }
+ return submitEntry(async()=>{
+  const a=$('#aType').value,min=Number($('#aMinutes').value),dist=$('#aDistance')&&!$('#distWrap').classList.contains('hidden')?Number($('#aDistance').value):null,
+   rawW=$('#aWitness').value,wid=rawW==='honor'?null:rawW,existing=id?entries.find(x=>x.id===id):null;
+  if(id&&!existing)throw new Error('Eintrag nicht mehr verfügbar. Bitte neu laden.');
+  if(!Number.isFinite(min)||min<0||min>1440||!Number.isInteger(min)||(dist!==null&&(!Number.isFinite(dist)||dist<0||dist>2000)))throw new Error('Bitte gültige Dauer und Distanz eingeben.');
+  const payload={user_id:me.id,entry_date:existing?.entry_date||selectedEntryDate(),kind:'activity',activity:a,minutes:min,distance:dist,witness:wid?firstName(profileById(wid)):'Ehrenkodex',witness_user_id:wid};
+  if(pendingProof)payload.photo_path=await uploadProof(pendingProof);
+  return payload;
+ },id,ev.currentTarget);
 }
 async function saveSteps(ev,id=''){
  ev.preventDefault();
- let before=celebrationSnapshot(),steps=Math.floor(+$('#sSteps').value/100)*100,
-     entryDate=id?entries.find(x=>x.id===id).entry_date:selectedEntryDate(),
-     payload={user_id:me.id,entry_date:entryDate,kind:'steps',steps,points:stepPoints(steps)};
- try{
-  let old=id?entries.find(x=>x.id===id):entries.find(e=>e.user_id===me.id&&e.entry_date===entryDate&&e.kind==='steps'),
-      res=old?await sb.from('entries').update(payload).eq('id',old.id).eq('user_id',me.id):await sb.from('entries').insert(payload);
-  if(res.error)throw res.error;
-  closeModal();await loadData();await detectChallengeCompletions(entryDate);await render();floatPoints(payload.points);maybeCelebrate(before);
-  toast(entryDate===fmtDate()?'Schritte gespeichert ✓':'Schritte rückwirkend gespeichert ✓');
- }catch(err){
-  if(likelyOffline(err)){queueEntry(payload,id?'update':'insert',id||null);closeModal();await render();return toast('Offline gespeichert – wird später synchronisiert.')}
-  toast(err.message);
- }
+ return submitEntry(async()=>{
+  const raw=Number($('#sSteps').value),existing=id?entries.find(x=>x.id===id):null;
+  if(id&&!existing)throw new Error('Eintrag nicht mehr verfügbar. Bitte neu laden.');
+  if(!Number.isFinite(raw)||raw<0||raw>200000)throw new Error('Bitte einen gültigen Tages-Schrittstand eingeben.');
+  return {user_id:me.id,entry_date:existing?.entry_date||selectedEntryDate(),kind:'steps',steps:Math.floor(raw/100)*100};
+ },id,ev.currentTarget);
 }
 async function saveFood(ev,id=''){
  ev.preventDefault();
- let before=celebrationSnapshot(),items=$$('input[name=food]:checked').map(x=>x.value),photo=null,
-     entryDate=id?entries.find(x=>x.id===id).entry_date:selectedEntryDate();
- try{
-  if(pendingProof)photo=await uploadProof(pendingProof);
-  let payload={user_id:me.id,entry_date:entryDate,kind:'food',food_items:items,points:foodPoints(items.length),witness:'Ehrenkodex',witness_user_id:null};
-  if(photo)payload.photo_path=photo;
-  let old=id?entries.find(x=>x.id===id):entries.find(e=>e.user_id===me.id&&e.entry_date===entryDate&&e.kind==='food'),
-      res=old?await sb.from('entries').update(payload).eq('id',old.id).eq('user_id',me.id):await sb.from('entries').insert(payload);
-  if(res.error)throw res.error;
-  pendingProof=null;closeModal();await loadData();await detectChallengeCompletions(entryDate);await render();floatPoints(payload.points);maybeCelebrate(before);
-  toast(entryDate===fmtDate()?'Ernährung gespeichert ✓':'Ernährung rückwirkend gespeichert ✓');
- }catch(err){
-  if(likelyOffline(err)&&!photo){
-   let payload={user_id:me.id,entry_date:entryDate,kind:'food',food_items:items,points:foodPoints(items.length),witness:'Ehrenkodex',witness_user_id:null};
-   queueEntry(payload,id?'update':'insert',id||null);pendingProof=null;closeModal();await render();return toast('Offline gespeichert – wird später synchronisiert.');
-  }
-  toast(err.message);
- }
+ return submitEntry(async()=>{
+  const existing=id?entries.find(x=>x.id===id):null;
+  if(id&&!existing)throw new Error('Eintrag nicht mehr verfügbar. Bitte neu laden.');
+  const payload={user_id:me.id,entry_date:existing?.entry_date||selectedEntryDate(),kind:'food',food_items:$$('input[name=food]:checked').map(x=>x.value),witness:'Ehrenkodex',witness_user_id:null};
+  if(pendingProof)payload.photo_path=await uploadProof(pendingProof);
+  return payload;
+ },id,ev.currentTarget);
 }
+
 function closeModal(){pendingProof=null;$('#modalRoot').innerHTML=''}
 
 async function openProfile(){
- let av=await signed('avatars',me.avatar_path);$('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>Profil</h2><button class="x" onclick="closeModal()">×</button></div><form class="form two section" onsubmit="saveProfile(event)"><div class="field"><label>Vorname</label><input id="pfFirst" value="${escapeHtml(me.first_name)}" required></div><div class="field"><label>Nachname</label><input id="pfLast" value="${escapeHtml(me.last_name)}" required></div><div class="full"><label class="strong small">Profilbild</label><div class="uploadBtns"><label class="uploadBtn primaryUpload">🖼️ Profilbild auswählen<input hidden type="file" accept="image/*" onchange="avatarFile(this)"></label></div><img id="avatarPreview" class="photoPreview ${av?'':'hidden'}" src="${av||''}"></div><button class="cta full">Profil speichern</button></form></div></div>`
+ let av=await signed('avatars',me.avatar_path);$('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>Profil</h2><button class="x" aria-label="Schließen" onclick="closeModal()">×</button></div><form class="form two section" onsubmit="saveProfile(event)"><div class="field"><label>Vorname</label><input id="pfFirst" value="${escapeHtml(me.first_name)}" required></div><div class="field"><label>Nachname</label><input id="pfLast" value="${escapeHtml(me.last_name)}" required></div><div class="full"><label class="strong small">Profilbild</label><div class="uploadBtns"><label class="uploadBtn primaryUpload">🖼️ Profilbild auswählen<input hidden type="file" accept="image/*" onchange="avatarFile(this)"></label></div><img id="avatarPreview" class="photoPreview ${av?'':'hidden'}" src="${av||''}"></div><button class="cta full">Profil speichern</button></form></div></div>`
 }
 function avatarFile(i){pendingAvatar=i.files?.[0]||null;if(pendingAvatar){let img=$('#avatarPreview');img.src=URL.createObjectURL(pendingAvatar);img.classList.remove('hidden')}}
 async function saveProfile(ev){ev.preventDefault();let path=me.avatar_path;try{if(pendingAvatar){let ext=(pendingAvatar.name.split('.').pop()||'jpg').toLowerCase();path=`${me.id}/avatar-${Date.now()}.${ext}`;let {error}=await sb.storage.from('avatars').upload(path,pendingAvatar);if(error)throw error}let {error}=await sb.from('profiles').update({first_name:$('#pfFirst').value.trim(),last_name:$('#pfLast').value.trim(),avatar_path:path}).eq('id',me.id);if(error)throw error;pendingAvatar=null;signedCache={};
@@ -2077,11 +2131,11 @@ function rewardOptions(m){
  let source=preferred.length>=3?preferred:pool;
  return shuffledCrypto(source).slice(0,Math.min(3,source.length));
 }
-function openReward(m){let opts=rewardOptions(m);$('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>🎉 ${m} Punkte!</h2><button class="x" onclick="closeModal()">×</button></div><p>Wähle eine Belohnung:</p><div class="grid">${opts.map(r=>`<button class="choice" onclick="chooseReward(${m},'${r.key}')"><b>${r.name}</b><div class="muted small">${r.desc}</div></button>`).join('')}</div></div></div>`}
+function openReward(m){let opts=rewardOptions(m);$('#modalRoot').innerHTML=`<div class="modal"><div class="modalCard"><div class="modalHead"><h2>🎉 ${m} Punkte!</h2><button class="x" aria-label="Schließen" onclick="closeModal()">×</button></div><p>Wähle eine Belohnung:</p><div class="grid">${opts.map(r=>`<button class="choice" onclick="chooseReward(${m},'${r.key}')"><b>${r.name}</b><div class="muted small">${r.desc}</div></button>`).join('')}</div></div></div>`}
 async function chooseReward(m,key){let {error}=await sb.from('reward_choices').insert({user_id:me.id,month_key:monthKey(),milestone:m,reward_key:key});if(error)return toast(error.message);closeModal();await loadData();await render();toast('Belohnung gespeichert 🎁')}
 
 
-const MOVO_VERSION='1.24.0';
+const MOVO_VERSION='1.24.1';
 let movoReloading=false;
 
 function cleanMovoUrl(){
@@ -2159,4 +2213,5 @@ async function checkPublishedVersion(reg){
   }
 }
 
-document.addEventListener('DOMContentLoaded',async()=>{await setupAppUpdates().catch(err=>console.warn('App update:',err));init()});
+document.addEventListener('DOMContentLoaded',()=>{setupAppUpdates().catch(err=>console.warn('App update:',err));init().catch(err=>{console.error(err);showError($('#boot'),'Movo konnte nicht gestartet werden. Bitte Verbindung prüfen und neu laden.')})});
+

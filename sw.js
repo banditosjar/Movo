@@ -1,5 +1,5 @@
-const VERSION='1.24.0';
-const CACHE='movo-v1.24.0';
+const VERSION='1.24.1';
+const CACHE='movo-v1.24.1';
 
 const CORE=[
   './',
@@ -106,3 +106,4 @@ self.addEventListener('notificationclick',event=>{
   return clients.openWindow(target)
  })())
 })
+

@@ -99,3 +99,7 @@ body,button,input,select,textarea{font-family:"Nunito Sans",system-ui,-apple-sys
 @media(max-width:959px){.homeFocusColumn{padding-bottom:0}.homeDashboardBottom{padding-top:0}.crewFeedList{display:grid;gap:12px}.crewContext{display:none}}
 /* Final V1.24 interactive target sizing */
 .tabsPanel .movoTabs button,.mockSegmented .movoTabs button,.mockSegmented .segmented button,.filterGroup button,.panelHead button{min-height:44px}
+
+
+/* V1.24.1: readable login and save status */
+.rememberLogin{display:flex;align-items:flex-start;gap:10px}.rememberLogin input{flex:0 0 auto;margin-top:4px}.rememberLogin span{display:flex;flex-direction:column;gap:3px}.rememberLogin small{display:block}.outboxNotice p{margin:8px 0}.outboxNotice .small{overflow-wrap:anywhere}button:disabled{cursor:wait;opacity:.65}
